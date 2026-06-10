@@ -68,7 +68,7 @@ public class Bridge : MelonPlugin
         if (GUI.Button(btnRect, "Mods Dir"))
         {
             var path = Path.Combine(MelonEnvironment.GameRootDirectory, "UMMMods");
-            Process.Start("explorer.exe", path);
+            Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
         }
     }
 }
