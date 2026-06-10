@@ -1,0 +1,9 @@
+* text=auto
+
+*.cs text diff
+*.csproj text
+*.slnx text
+*.xml text
+*.json text
+*.md text
+.gitignore text
