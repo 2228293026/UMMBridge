@@ -19,3 +19,6 @@ dotnet build UMMBridge\UMMBridge.csproj -c Release
 ```
 
 Or open `UMMBridge.slnx` in Visual Studio 2022. The `Deploy` configuration outputs directly to the game's Plugins directory.
+
+
+<img width="1282" height="752" alt="image" src="https://github.com/user-attachments/assets/04447190-7fb8-4254-8091-63512e2deda0" />
