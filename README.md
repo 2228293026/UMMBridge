@@ -4,14 +4,18 @@ Run [UnityModManager](https://github.com/newman55/unity-mod-manager) (UMM) mods 
 
 ## How it works
 
-Uses Harmony to intercept the `UnityModManager.modsPath` getter, redirecting it to `UMMMods/` directory, then boots UMM. Traditional UMM mods and MelonLoader mods coexist seamlessly.
+Uses Harmony to intercept the `UnityModManager.modsPath` getter, redirecting it to `UMMMods/` directory, then boots UMM. Traditional UMM mods and MelonLoader mods coexist seamlessly. A button to open the mods folder is added at the top-right of the UMM window.
 
 ## Usage
 
 1. Drop the compiled DLL into ADOFAI's `Plugins/` directory
-2. Create `UMMMods/` in the game root directory
-3. Place UMM mods into `UMMMods/`
+2. Place UMM mods into `UMMMods/` (created automatically on first launch)
+3. Open the UMM window and click **Mods Dir** at the top-right
 
 ## Build
 
-Open `UMMBridge.slnx` in Visual Studio 2022. The `Deploy|x64` configuration outputs directly to the game's Plugins directory.
+```
+dotnet build UMMBridge\UMMBridge.csproj -c Release
+```
+
+Or open `UMMBridge.slnx` in Visual Studio 2022. The `Deploy` configuration outputs directly to the game's Plugins directory.
