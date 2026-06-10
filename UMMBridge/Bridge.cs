@@ -26,8 +26,7 @@ public class Bridge : MelonPlugin
     private static bool RedirectModsPath(ref string __result)
     {
         var ummModsDir = Path.Combine(MelonEnvironment.GameRootDirectory, "UMMMods");
-        if (!Directory.Exists(ummModsDir))
-            return true;
+        Directory.CreateDirectory(ummModsDir);
         __result = ummModsDir;
         return false;
     }
