@@ -1,7 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using MelonLoader;
@@ -41,12 +40,10 @@ public class Bridge : MelonPlugin
     {
         try
         {
-            var uiType = AppDomain.CurrentDomain.GetAssemblies()
-                .SelectMany(a => a.GetTypes())
-                .FirstOrDefault(t => t.Name == "UI" && t.Namespace?.Contains("UnityModManager") == true);
+            var uiType = typeof(UnityModManager).Assembly.GetType("UnityModManagerNet.UnityModManager+UI");
             if (uiType == null)
             {
-                LoggerInstance.Warning("UI type not found");
+                LoggerInstance.Warning("UI nested type not found");
                 return;
             }
             var windowFunc = AccessTools.Method(uiType, "WindowFunction");
