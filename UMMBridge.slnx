@@ -1,8 +1,3 @@
 <Solution>
   <Project Path="UMMBridge\UMMBridge.csproj" Id="285d8437-6a8e-4abe-ab99-9936852430f8" />
-  <Build>
-    <ProjectConfiguration Project="UMMBridge\UMMBridge.csproj" SolutionConfiguration="Debug" SolutionPlatform="x64" ProjectConfiguration="Debug" ProjectPlatform="x64" />
-    <ProjectConfiguration Project="UMMBridge\UMMBridge.csproj" SolutionConfiguration="Release" SolutionPlatform="x64" ProjectConfiguration="Release" ProjectPlatform="x64" />
-    <ProjectConfiguration Project="UMMBridge\UMMBridge.csproj" SolutionConfiguration="Deploy" SolutionPlatform="x64" ProjectConfiguration="Deploy" ProjectPlatform="x64" />
-  </Build>
 </Solution>
