@@ -17,6 +17,8 @@ public class Bridge : MelonPlugin
 
     public override void OnApplicationStarted()
     {
+        AssemblyInterceptor.Initialize();
+
         var harmony = new HarmonyLib.Harmony("UMMBridge");
         harmony.Patch(OriginalModsPathGetter, new HarmonyMethod(RedirectMethod));
 
