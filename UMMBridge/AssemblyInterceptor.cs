@@ -154,11 +154,14 @@ namespace UMMBridge
                     return null;
 
                 bool modified = false;
+                bool isUmmMod = filePath.Contains("UMMMods");
                 foreach (var type in asmDef.MainModule.GetAllTypes())
                     foreach (var method in type.Methods)
                     {
                         if (!method.HasBody) continue;
                         modified |= RewriteMethodCalls(method, asmDef.MainModule);
+                        if (isUmmMod)
+                            modified |= RewriteHardcodedPaths(method);
                     }
 
                 if (!modified) return null;
@@ -210,6 +213,48 @@ namespace UMMBridge
                         proc.InsertBefore(inst, proc.Create(OpCodes.Pop));
                         inst.Operand = MakePatchAllRef(mr, module, false);
                     }
+                    modified = true;
+                }
+            }
+            return modified;
+        }
+
+        /// <summary>
+        /// Rewrite ldstr instructions that reference "Mods" directory to "UMMMods",
+        /// so mods that hardcode "Mods" instead of using UnityModManager.modsPath
+        /// still find their files under the redirected directory.
+        /// </summary>
+        private static bool RewriteHardcodedPaths(MethodDefinition method)
+        {
+            bool modified = false;
+            foreach (var inst in method.Body.Instructions)
+            {
+                if (inst.OpCode != OpCodes.Ldstr || inst.Operand is not string s)
+                    continue;
+
+                string replaced = null;
+                if (s == "Mods")
+                    replaced = "UMMMods";
+                else if (s.EndsWith("/Mods"))
+                    replaced = s.Substring(0, s.Length - 4) + "UMMMods";
+                else if (s.EndsWith("\\Mods"))
+                    replaced = s.Substring(0, s.Length - 4) + "UMMMods";
+                else if (s.EndsWith("/Mods/"))
+                    replaced = s.Substring(0, s.Length - 5) + "UMMMods/";
+                else if (s.EndsWith("\\Mods\\"))
+                    replaced = s.Substring(0, s.Length - 5) + "UMMMods\\";
+                else if (s.StartsWith("Mods/"))
+                    replaced = "UMMMods/" + s.Substring(5);
+                else if (s.StartsWith("Mods\\"))
+                    replaced = "UMMMods\\" + s.Substring(5);
+                else if (s.Contains("/Mods/"))
+                    replaced = s.Replace("/Mods/", "/UMMMods/");
+                else if (s.Contains("\\Mods\\"))
+                    replaced = s.Replace("\\Mods\\", "\\UMMMods\\");
+
+                if (replaced != null && replaced != s)
+                {
+                    inst.Operand = replaced;
                     modified = true;
                 }
             }
