@@ -75,6 +75,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="AssemblyInterceptor.cs" />
+    <Compile Include="AssemblyInterceptor.CategoryCompat.cs" />
     <Compile Include="Bridge.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>

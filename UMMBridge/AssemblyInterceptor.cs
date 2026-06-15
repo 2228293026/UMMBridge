@@ -1,48 +1,46 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using MelonLoader;
+using MelonLoader.Utils;
 using Mono.Cecil;
 using Mono.Cecil.Rocks;
 using Mono.Cecil.Cil;
-
-// ── Type stubs for missing runtime types ────────────────────────────
-
-namespace HarmonyLib
-{
-    /// <summary>
-    /// Stub for HarmonyLib.HarmonyPatchCategory that exists in some Harmony builds
-    /// but not in MelonLoader's fork. Provided via AppDomain.TypeResolve so that
-    /// mod assemblies carrying [HarmonyPatchCategory] attributes don't crash when
-    /// GetCustomAttributes() tries to instantiate them.
-    /// </summary>
-    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Method)]
-    internal class HarmonyPatchCategory : Attribute
-    {
-        public string Category { get; }
-        public HarmonyPatchCategory(string category) { Category = category; }
-    }
-}
 
 // ── Assembly interceptor ────────────────────────────────────────────
 
 namespace UMMBridge
 {
-    internal static class AssemblyInterceptor
+    internal static partial class AssemblyInterceptor
     {
         private static bool _initialized;
-        private static readonly bool _hasPatchAllUncategorized;
+        private static Assembly _ummHarmony;
+        private static Assembly _harmonyX;
+
+        /// <summary>
+        /// Directory name under the game root where UMM mods reside.
+        /// Used for path checks, Cecil IL rewriting, and runtime resolution.
+        /// </summary>
+        internal const string ModsDirName = "UMMMods";
+
+        /// <summary>
+        /// Full path to the UMM mods directory.
+        /// Derived from ModsDirName at first access.
+        /// </summary>
+        internal static string ModsRootPath =>
+            Path.Combine(MelonEnvironment.GameRootDirectory, ModsDirName);
+
+        private static readonly Dictionary<string, string> _assemblyToDir = new();
+        private static readonly Dictionary<string, Assembly> _assemblyCache = new();
 
         static AssemblyInterceptor()
         {
-            _hasPatchAllUncategorized = typeof(HarmonyLib.Harmony).GetMethod(
-                "PatchAllUncategorized",
-                BindingFlags.Public | BindingFlags.Instance,
-                null, new[] { typeof(Assembly) }, null) != null;
-
             AppDomain.CurrentDomain.TypeResolve += OnTypeResolve;
+            AppDomain.CurrentDomain.AssemblyResolve += OnAssemblyResolve;
         }
 
         private static Assembly OnTypeResolve(object sender, ResolveEventArgs args)
@@ -51,21 +49,89 @@ namespace UMMBridge
             if (name == "HarmonyLib.HarmonyPatchCategory")
             {
                 Melon<Bridge>.Logger.Msg("TypeResolve: served HarmonyPatchCategory stub");
-                return typeof(HarmonyLib.HarmonyPatchCategory).Assembly;
+                return typeof(HarmonyPatchCategory).Assembly;
             }
             return null;
         }
 
-        /// <summary>
-        /// Verify that the HarmonyPatchCategory stub is reachable via TypeResolve.
-        /// The runtime Harmony lacks this type, so GetType("HarmonyLib.HarmonyPatchCategory, 0Harmony")
-        /// should trigger TypeResolve, which returns our stub.
-        /// </summary>
+        private static Assembly OnAssemblyResolve(object sender, ResolveEventArgs args)
+        {
+            var name = args.Name.Split(',')[0].Trim();
+
+            if (name == "0Harmony_UMM" && _ummHarmony != null)
+                return _ummHarmony;
+
+            if (name == "0Harmony" && _harmonyX != null)
+                return _harmonyX;
+
+            lock (_assemblyToDir)
+            {
+                if (_assemblyCache.TryGetValue(name, out var cached))
+                    return cached;
+
+                if (_assemblyToDir.TryGetValue(name, out var dir))
+                {
+                    var path = Path.Combine(dir, name + ".dll");
+                    if (File.Exists(path))
+                    {
+                        Melon<Bridge>.Logger.Msg($"AssemblyResolve: served {name} from {dir}");
+                        var asm = Assembly.LoadFrom(path);
+                        _assemblyCache[name] = asm;
+                        return asm;
+                    }
+                    return null;
+                }
+            }
+
+            if (Directory.Exists(ModsRootPath))
+            {
+                try
+                {
+                    var found = Directory.GetFiles(ModsRootPath, name + ".dll", SearchOption.AllDirectories)
+                                        .FirstOrDefault();
+                    if (found != null)
+                    {
+                        var modDir = Path.GetDirectoryName(found);
+                        lock (_assemblyToDir)
+                        {
+                            _assemblyToDir[name] = modDir;
+                            var asm = Assembly.LoadFrom(found);
+                            _assemblyCache[name] = asm;
+                            Melon<Bridge>.Logger.Msg($"AssemblyResolve: served {name} (scanned from {modDir})");
+                            return asm;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            return null;
+        }
+
+        private static void RegisterModDirectory(string modAssemblyPath)
+        {
+            var dir = Path.GetDirectoryName(modAssemblyPath);
+            if (dir == null) return;
+
+            lock (_assemblyToDir)
+            {
+                var mainName = Path.GetFileNameWithoutExtension(modAssemblyPath);
+                if (!_assemblyToDir.ContainsKey(mainName))
+                    _assemblyToDir[mainName] = dir;
+
+                foreach (var dll in Directory.GetFiles(dir, "*.dll"))
+                {
+                    var name = Path.GetFileNameWithoutExtension(dll);
+                    if (!_assemblyToDir.ContainsKey(name))
+                        _assemblyToDir[name] = dir;
+                }
+            }
+        }
+
         private static void VerifyPatchCategoryStub()
         {
             try
             {
-                // Force a TypeResolve event by requesting the type from the 0Harmony assembly
                 var resolved = Type.GetType("HarmonyLib.HarmonyPatchCategory, 0Harmony", false);
                 if (resolved != null)
                     Melon<Bridge>.Logger.Msg("HarmonyPatchCategory stub verified (TypeResolve active)");
@@ -78,65 +144,132 @@ namespace UMMBridge
             }
         }
 
+        // ── Initialization ──────────────────────────────────────────────
+
         public static void Initialize()
         {
             if (_initialized) return;
             _initialized = true;
 
-            // Verify TypeResolve stub works
             VerifyPatchCategoryStub();
 
-            if (_hasPatchAllUncategorized)
+            _harmonyX = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => a.GetName().Name == "0Harmony" &&
+                                     a.GetName().Version.Major >= 2);
+
+            var ummHarmonyBytes = LoadUmmHarmonyAs_UMM();
+            if (ummHarmonyBytes == null)
+            {
+                Melon<Bridge>.Logger.Warning(
+                    "UMM 0Harmony.dll not found alongside UnityModManager.dll — " +
+                    "mods using Harmony 2.x internals will NOT load.  Install/restore UnityModManager.");
                 return;
+            }
+            _ummHarmony = Assembly.Load(ummHarmonyBytes);
+            Melon<Bridge>.Logger.Msg($"Loaded UMM 0Harmony as 0Harmony_UMM v{_ummHarmony.GetName().Version}");
 
             try
             {
-                var harmony = new HarmonyLib.Harmony("UMMBridge.AssemblyInterceptor");
-                var loadFrom = typeof(Assembly).GetMethod(
-                    "LoadFrom",
-                    BindingFlags.Public | BindingFlags.Static,
-                    null,
-                    new[] { typeof(string) },
-                    null);
-                var prefix = typeof(AssemblyInterceptor).GetMethod(
-                    nameof(Prefix_LoadFrom),
-                    BindingFlags.NonPublic | BindingFlags.Static);
+                var h = new HarmonyLib.Harmony("UMMBridge.AssemblyInterceptor");
+                var loadFrom = AccessTools.Method(typeof(Assembly), "LoadFrom", new[] { typeof(string) });
+                var prefix = AccessTools.Method(typeof(AssemblyInterceptor), nameof(Prefix_LoadFrom));
+
+                var unpatchAll = AccessTools.Method(typeof(HarmonyLib.Harmony), "UnpatchAll", new[] { typeof(string) });
+                var prefixUnpatch = AccessTools.Method(typeof(AssemblyInterceptor), nameof(Prefix_UnpatchAll));
 
                 if (loadFrom != null && prefix != null)
                 {
-                    harmony.Patch(loadFrom, new HarmonyMethod(prefix));
+                    h.Patch(loadFrom, new HarmonyMethod(prefix));
+                    if (unpatchAll != null && prefixUnpatch != null)
+                        h.Patch(unpatchAll, new HarmonyMethod(prefixUnpatch));
                     Melon<Bridge>.Logger.Msg(
-                        "Assembly.LoadFrom interceptor active — patching PatchAllUncategorized calls in mod assemblies");
+                        "Assembly.LoadFrom + UnpatchAll interceptors active");
                 }
             }
             catch (Exception ex)
             {
-                Melon<Bridge>.Logger.Warning($"Assembly.LoadFrom interceptor failed: {ex.Message}");
+                Melon<Bridge>.Logger.Warning($"Interceptor initialization failed: {ex.Message}");
             }
         }
 
-        // ── Harmony Prefix on Assembly.LoadFrom(string) ─────────────────
-
-        private static readonly System.Collections.Generic.Dictionary<string, byte[]> _patchedCache = new();
-
-        private static bool Prefix_LoadFrom(ref string assemblyFile, ref System.Reflection.Assembly __result)
+        private static byte[] LoadUmmHarmonyAs_UMM()
         {
-            if (!assemblyFile.Contains("UMMMods"))
+            Assembly ummAssembly;
+            try
+            {
+                ummAssembly = typeof(UnityModManagerNet.UnityModManager).Assembly;
+            }
+            catch (Exception ex)
+            {
+                Melon<Bridge>.Logger.Warning(
+                    $"UnityModManagerNet.UnityModManager type not found. UnityModManager may be missing: {ex.Message}");
+                return null;
+            }
+
+            var ummDir = Path.GetDirectoryName(ummAssembly.Location);
+            var path = Path.Combine(ummDir, "0Harmony.dll");
+            if (!File.Exists(path)) return null;
+
+            byte[] originalBytes;
+            try { originalBytes = File.ReadAllBytes(path); }
+            catch { return null; }
+
+            using (var ms = new MemoryStream(originalBytes))
+            using (var asmDef = AssemblyDefinition.ReadAssembly(ms))
+            {
+                var originalVersion = asmDef.Name.Version;
+                asmDef.Name = new AssemblyNameDefinition("0Harmony_UMM", originalVersion);
+                asmDef.Name.PublicKeyToken = Array.Empty<byte>();
+                asmDef.Name.PublicKey = Array.Empty<byte>();
+
+                using var outMs = new MemoryStream();
+                asmDef.Write(outMs);
+                return outMs.ToArray();
+            }
+        }
+
+        // ── Harmony Prefix: LoadFrom ────────────────────────────────────
+
+        /// <summary>
+        /// Tracks the original file path for assemblies loaded via
+        /// Assembly.Load(byte[]) so Bridge.GetAssemblyLocation() can
+        /// recover the real path at runtime (used by Cecil-rewritten
+        /// get_Location calls in patched mods).
+        /// </summary>
+        internal static readonly ConditionalWeakTable<Assembly, string> _assemblyOriginalPath = new();
+
+        /// <summary>
+        /// Set before Assembly.Load() so that static constructors
+        /// can still resolve their original path via Bridge.GetAssemblyLocation()
+        /// before the CWT entry is populated.
+        /// </summary>
+        [ThreadStatic]
+        internal static string _currentLoadingPath;
+
+        private static bool Prefix_LoadFrom(ref string assemblyFile, ref Assembly __result)
+        {
+            if (!assemblyFile.Contains(ModsDirName))
                 return true;
 
-            if (_patchedCache.TryGetValue(assemblyFile, out var cachedBytes))
-            {
-                __result = System.Reflection.Assembly.Load(cachedBytes);
-                return false;
-            }
+            RegisterModDirectory(assemblyFile);
+            ScanHarmonyPatchCategories(assemblyFile);
 
             var patched = PatchAssemblyFile(assemblyFile);
             if (patched == null)
                 return true;
 
-            _patchedCache[assemblyFile] = patched;
-            __result = System.Reflection.Assembly.Load(patched);
-            return false;
+            _currentLoadingPath = assemblyFile;
+            try
+            {
+                var asm = Assembly.Load(patched);
+                _assemblyOriginalPath.Add(asm, assemblyFile);
+                __result = asm;
+                return false;
+            }
+            finally
+            {
+                _currentLoadingPath = null;
+            }
         }
 
         // ── Mono.Cecil IL rewriting ──────────────────────────────────────
@@ -150,18 +283,43 @@ namespace UMMBridge
             using (var ms = new MemoryStream(originalBytes))
             using (var asmDef = AssemblyDefinition.ReadAssembly(ms))
             {
-                if (!asmDef.MainModule.AssemblyReferences.Any(r => r.Name == "0Harmony"))
-                    return null;
-
                 bool modified = false;
-                bool isUmmMod = filePath.Contains("UMMMods");
+                var harmonyRef = asmDef.MainModule.AssemblyReferences
+                    .FirstOrDefault(r => r.Name == "0Harmony");
+
+                if (harmonyRef != null)
+                {
+                    // All UMM mods share a single Harmony 2.3.x runtime
+                    // (0Harmony_UMM) to prevent cross-runtime conflicts.
+                    // HarmonyX is only used by MelonLoader itself.
+                    harmonyRef.Name = "0Harmony_UMM";
+                    harmonyRef.PublicKeyToken = Array.Empty<byte>();
+                    modified = true;
+                    Melon<Bridge>.Logger.Msg(
+                        $"{Path.GetFileName(filePath)} → 0Harmony_UMM");
+                }
+
+                // Import Bridge.GetAssemblyLocation for Cecil rewriting
+                MethodReference getLocationHelper = null;
+                try
+                {
+                    var helper = typeof(Bridge).GetMethod(
+                        nameof(Bridge.GetAssemblyLocation),
+                        BindingFlags.Public | BindingFlags.Static,
+                        null, new[] { typeof(Assembly) }, null);
+                    if (helper != null)
+                        getLocationHelper = asmDef.MainModule.ImportReference(helper);
+                }
+                catch { }
+
                 foreach (var type in asmDef.MainModule.GetAllTypes())
                     foreach (var method in type.Methods)
                     {
                         if (!method.HasBody) continue;
-                        modified |= RewriteMethodCalls(method, asmDef.MainModule);
-                        if (isUmmMod)
-                            modified |= RewriteHardcodedPaths(method);
+                        modified |= RewriteHardcodedPaths(method);
+                        modified |= RewriteHarmonyLegacyMethods(method);
+                        if (getLocationHelper != null)
+                            modified |= RewriteAssemblyGetLocation(method, getLocationHelper);
                     }
 
                 if (!modified) return null;
@@ -173,57 +331,33 @@ namespace UMMBridge
             }
         }
 
-        private static bool RewriteMethodCalls(MethodDefinition method, ModuleDefinition module)
+        /// <summary>
+        /// Replace calls to Assembly.get_Location() with
+        /// Bridge.GetAssemblyLocation(Assembly) so that byte-loaded
+        /// UMM mods can recover their original file paths at runtime.
+        /// HarmonyX's patching of this virtual getter is unreliable
+        /// (see: HarmonyX detour limitations).
+        /// </summary>
+        private static bool RewriteAssemblyGetLocation(MethodDefinition method, MethodReference helper)
         {
-            if (!method.HasBody) return false;
-            var proc = method.Body.GetILProcessor();
-            var instructions = method.Body.Instructions;
             bool modified = false;
-
-            for (int i = 0; i < instructions.Count; i++)
+            foreach (var inst in method.Body.Instructions)
             {
-                var inst = instructions[i];
-                if (inst.OpCode != OpCodes.Call && inst.OpCode != OpCodes.Callvirt)
-                    continue;
-                if (inst.Operand is not MethodReference mr ||
-                    mr.DeclaringType.FullName != "HarmonyLib.Harmony")
+                if ((inst.OpCode != OpCodes.Call && inst.OpCode != OpCodes.Callvirt) ||
+                    inst.Operand is not MethodReference mr ||
+                    mr.Name != "get_Location" ||
+                    mr.DeclaringType.FullName != "System.Reflection.Assembly")
                     continue;
 
-                if (mr.Name == "PatchAllUncategorized")
-                {
-                    inst.Operand = MakePatchAllRef(mr, module, mr.Parameters.Count >= 1);
-                    modified = true;
-                }
-                else if (mr.Name == "PatchCategory")
-                {
-                    if (mr.Parameters.Count >= 2)
-                    {
-                        // Stack: [this, string, Assembly]. Need: [this, Assembly].
-                        // Save Assembly via local, pop string, restore Assembly.
-                        var asmVar = new VariableDefinition(module.ImportReference(typeof(Assembly)));
-                        method.Body.Variables.Add(asmVar);
-                        proc.InsertBefore(inst, proc.Create(OpCodes.Stloc, asmVar));
-                        proc.InsertBefore(inst, proc.Create(OpCodes.Pop));
-                        proc.InsertBefore(inst, proc.Create(OpCodes.Ldloc, asmVar));
-                        inst.Operand = MakePatchAllRef(mr, module, true);
-                    }
-                    else
-                    {
-                        // Stack: [this, string]. Need: [this].
-                        proc.InsertBefore(inst, proc.Create(OpCodes.Pop));
-                        inst.Operand = MakePatchAllRef(mr, module, false);
-                    }
-                    modified = true;
-                }
+                // get_Location is a virtual instance getter → callvirt;
+                // our helper is a static method → call.
+                inst.OpCode = OpCodes.Call;
+                inst.Operand = helper;
+                modified = true;
             }
             return modified;
         }
 
-        /// <summary>
-        /// Rewrite ldstr instructions that reference "Mods" directory to "UMMMods",
-        /// so mods that hardcode "Mods" instead of using UnityModManager.modsPath
-        /// still find their files under the redirected directory.
-        /// </summary>
         private static bool RewriteHardcodedPaths(MethodDefinition method)
         {
             bool modified = false;
@@ -234,23 +368,23 @@ namespace UMMBridge
 
                 string replaced = null;
                 if (s == "Mods")
-                    replaced = "UMMMods";
+                    replaced = ModsDirName;
                 else if (s.EndsWith("/Mods"))
-                    replaced = s.Substring(0, s.Length - 4) + "UMMMods";
+                    replaced = s.Substring(0, s.Length - 4) + ModsDirName;
                 else if (s.EndsWith("\\Mods"))
-                    replaced = s.Substring(0, s.Length - 4) + "UMMMods";
+                    replaced = s.Substring(0, s.Length - 4) + ModsDirName;
                 else if (s.EndsWith("/Mods/"))
-                    replaced = s.Substring(0, s.Length - 5) + "UMMMods/";
+                    replaced = s.Substring(0, s.Length - 5) + ModsDirName + "/";
                 else if (s.EndsWith("\\Mods\\"))
-                    replaced = s.Substring(0, s.Length - 5) + "UMMMods\\";
+                    replaced = s.Substring(0, s.Length - 5) + ModsDirName + "\\";
                 else if (s.StartsWith("Mods/"))
-                    replaced = "UMMMods/" + s.Substring(5);
+                    replaced = ModsDirName + "/" + s.Substring(5);
                 else if (s.StartsWith("Mods\\"))
-                    replaced = "UMMMods\\" + s.Substring(5);
+                    replaced = ModsDirName + "\\" + s.Substring(5);
                 else if (s.Contains("/Mods/"))
-                    replaced = s.Replace("/Mods/", "/UMMMods/");
+                    replaced = s.Replace("/Mods/", "/" + ModsDirName + "/");
                 else if (s.Contains("\\Mods\\"))
-                    replaced = s.Replace("\\Mods\\", "\\UMMMods\\");
+                    replaced = s.Replace("\\Mods\\", "\\" + ModsDirName + "\\");
 
                 if (replaced != null && replaced != s)
                 {
@@ -261,20 +395,26 @@ namespace UMMBridge
             return modified;
         }
 
-        private static MethodReference MakePatchAllRef(
-            MethodReference original, ModuleDefinition module, bool withAssemblyParam)
+        /// <summary>
+        /// Rewrite calls to Harmony 2.3.x methods that don't exist in HarmonyX.
+        /// Currently: PatchAllUncategorized → PatchAll (same signature).
+        /// </summary>
+        private static bool RewriteHarmonyLegacyMethods(MethodDefinition method)
         {
-            var patchAll = new MethodReference(
-                "PatchAll", module.TypeSystem.Void, original.DeclaringType)
+            bool modified = false;
+            if (!method.HasBody) return false;
+
+            foreach (var inst in method.Body.Instructions)
             {
-                HasThis = original.HasThis,
-                ExplicitThis = original.ExplicitThis,
-                CallingConvention = original.CallingConvention,
-            };
-            if (withAssemblyParam)
-                patchAll.Parameters.Add(
-                    new ParameterDefinition(module.ImportReference(typeof(Assembly))));
-            return module.ImportReference(patchAll);
+                if (inst.Operand is MethodReference mr &&
+                    mr.DeclaringType.FullName == "HarmonyLib.Harmony" &&
+                    mr.Name == "PatchAllUncategorized")
+                {
+                    mr.Name = "PatchAll";
+                    modified = true;
+                }
+            }
+            return modified;
         }
     }
 }

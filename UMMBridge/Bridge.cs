@@ -32,10 +32,32 @@ public class Bridge : MelonPlugin
 
     private static bool RedirectModsPath(ref string __result)
     {
-        var ummModsDir = Path.Combine(MelonEnvironment.GameRootDirectory, "UMMMods");
+        var ummModsDir = AssemblyInterceptor.ModsRootPath;
         Directory.CreateDirectory(ummModsDir);
         __result = ummModsDir;
         return false;
+    }
+
+    /// <summary>
+    /// Called from Cecil-rewritten mod assemblies to resolve
+    /// Assembly.get_Location() for byte-loaded assemblies.
+    /// Returns the original file path if cached, otherwise falls
+    /// back to the real Location.
+    /// </summary>
+    public static string GetAssemblyLocation(Assembly asm)
+    {
+        // Fast path — most calls happen after CWT is populated
+        if (AssemblyInterceptor._assemblyOriginalPath.TryGetValue(asm, out var path))
+            return path;
+
+        // Fallback for static constructors that run inside Assembly.Load():
+        // the CWT entry hasn't been added yet, but the thread-local
+        // _currentLoadingPath is set before Assembly.Load().
+        var loadingPath = AssemblyInterceptor._currentLoadingPath;
+        if (loadingPath != null)
+            return loadingPath;
+
+        return asm.Location;
     }
 
     private void PatchUI()
@@ -69,7 +91,7 @@ public class Bridge : MelonPlugin
         var btnRect = new Rect(rect.width - 105, 3, 100, 22);
         if (GUI.Button(btnRect, "Mods Dir"))
         {
-            var path = Path.Combine(MelonEnvironment.GameRootDirectory, "UMMMods");
+            var path = AssemblyInterceptor.ModsRootPath;
             Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
         }
     }
