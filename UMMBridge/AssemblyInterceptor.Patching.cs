@@ -25,8 +25,19 @@ namespace UMMBridge
             try { originalBytes = File.ReadAllBytes(filePath); }
             catch { return null; }
 
-            using (var ms = new MemoryStream(originalBytes))
-            using (var asmDef = AssemblyDefinition.ReadAssembly(ms))
+            AssemblyDefinition asmDef;
+            try
+            {
+                asmDef = AssemblyDefinition.ReadAssembly(new MemoryStream(originalBytes));
+            }
+            catch
+            {
+                Melon<Bridge>.Logger.Warning(
+                    $"Skipping (not a .NET assembly): {Path.GetFileName(filePath)}");
+                return null;
+            }
+
+            using (asmDef)
             {
                 bool modified = false;
                 var harmonyRef = asmDef.MainModule.AssemblyReferences
@@ -38,27 +49,23 @@ namespace UMMBridge
                     harmonyRef.PublicKeyToken = Array.Empty<byte>();
                     modified = true;
 
-                    bool usesTranspiler = ModUsesTranspiler(asmDef);
-                    if (!usesTranspiler)
+                    // Assembly-level transpiler check: if the assembly has ANY
+                    // transpiler, keep Harmony.Patch() calls native — don't
+                    // rewrite them (avoids accidentally flagging methods in
+                    // PatchedMethods via ProxyPatch).
+                    // The CreateClassProcessor/PatchAll path still does
+                    // per-method routing at UpdateWrapper (RouteConflict-
+                    // UpdateWrapper) for non-transpiler methods.
+                    if (!ModUsesTranspiler(asmDef))
                     {
-                        // No transpiler → rewrite harmony.Patch() call sites
-                        // to Bridge.ProxyPatch, so detours go through
-                        // HarmonyX's MonoMod (single writer).
                         modified |= RewriteHarmonyPatchCalls(asmDef);
                         Melon<Bridge>.Logger.Msg(
-                            $"{Path.GetFileName(filePath)} → 0Harmony_UMM (ProxyPatch)");
+                            $"{Path.GetFileName(filePath)} → ProxyPatch");
                     }
                     else
                     {
-                        // Transpiler detected → keep 0Harmony_UMM's native
-                        // Patch().  Its own MonoMod writes the detour.
-                        // This is safe because transpiler mods don't patch
-                        // the same methods as non-transpiler or ML mods.  If
-                        // two MonoMod instances ever hit the same method that
-                        // will need a different fix, but in practice they
-                        // don't (ADOFAI mods each patch their own methods).
                         Melon<Bridge>.Logger.Msg(
-                            $"{Path.GetFileName(filePath)} → 0Harmony_UMM (native, transpiler)");
+                            $"{Path.GetFileName(filePath)} → 0Harmony_UMM (transpiler assembly)");
                     }
                 }
 

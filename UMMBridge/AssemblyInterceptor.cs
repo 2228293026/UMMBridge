@@ -18,7 +18,7 @@ namespace UMMBridge
     internal static partial class AssemblyInterceptor
     {
         private static bool _initialized;
-        private static Assembly _ummHarmony;
+        internal static Assembly _ummHarmony;
         private static Assembly _harmonyX;
 
         /// <summary>
@@ -138,6 +138,43 @@ namespace UMMBridge
             _ummHarmony = Assembly.Load(ummHarmonyBytes);
             Melon<Bridge>.Logger.Msg($"Loaded UMM 0Harmony as 0Harmony_UMM v{_ummHarmony.GetName().Version}");
 
+            // Hook 0Harmony_UMM's Harmony.Patch() via HarmonyX prefix.
+            // When a transpiler call arrives, TryResolveConflict migrates any
+            // ProxyPatch-created patches from HarmonyX to 0Harmony_UMM,
+            // so both runtimes' UMM mods coexist on the same method.
+            try
+            {
+                var ummHarmonyType = _ummHarmony.GetType("HarmonyLib.Harmony");
+                if (ummHarmonyType != null)
+                {
+                    var patchMethod = ummHarmonyType.GetMethod("Patch", new[] {
+                        typeof(MethodBase),
+                        ummHarmonyType.Assembly.GetType("HarmonyLib.HarmonyMethod"),
+                        ummHarmonyType.Assembly.GetType("HarmonyLib.HarmonyMethod"),
+                        ummHarmonyType.Assembly.GetType("HarmonyLib.HarmonyMethod"),
+                        ummHarmonyType.Assembly.GetType("HarmonyLib.HarmonyMethod")
+                    });
+                    if (patchMethod != null)
+                    {
+                        var bridgePrefix = typeof(Bridge).GetMethod(
+                            nameof(Bridge.Prefix_UMMPatch),
+                            BindingFlags.Public | BindingFlags.Static);
+                        if (bridgePrefix != null)
+                        {
+                            var h = new HarmonyLib.Harmony("UMMBridge.UMMHook");
+                            h.Patch(patchMethod, new HarmonyMethod(bridgePrefix));
+                            Melon<Bridge>.Logger.Msg(
+                                "0Harmony_UMM::Harmony.Patch() hooked — transpiler migration active");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Melon<Bridge>.Logger.Warning(
+                    $"Failed to hook 0Harmony_UMM Harmony.Patch(): {ex.Message}");
+            }
+
             try
             {
                 var h = new HarmonyLib.Harmony("UMMBridge.AssemblyInterceptor");
@@ -187,6 +224,60 @@ namespace UMMBridge
                 asmDef.Name.PublicKeyToken = Array.Empty<byte>();
                 asmDef.Name.PublicKey = Array.Empty<byte>();
 
+                // ── Only Cecil injection: PatchFunctions.UpdateWrapper() ──
+                // CreateClassProcessor/PatchAll calls bypass Harmony.Patch()
+                // and reach UpdateWrapper via ProcessPatchJob.  This injection
+                // tries migration first, then falls back to RouteConflictUpdateWrapper.
+                var patchFunctionsType = asmDef.MainModule.GetType("HarmonyLib.PatchFunctions");
+                if (patchFunctionsType != null)
+                {
+                    var tracker3 = typeof(Bridge).GetMethod(
+                        nameof(Bridge.IsMethodPatchedByProxy),
+                        BindingFlags.Public | BindingFlags.Static,
+                        null, new[] { typeof(MethodBase) }, null);
+                    var resolveMethod = typeof(Bridge).GetMethod(
+                        nameof(Bridge.TryResolveConflict),
+                        BindingFlags.Public | BindingFlags.Static,
+                        null, new[] { typeof(MethodBase) }, null);
+                    var routeMethod = typeof(Bridge).GetMethod(
+                        nameof(Bridge.RouteConflictUpdateWrapper),
+                        BindingFlags.Public | BindingFlags.Static,
+                        null, new[] { typeof(MethodBase), typeof(object) }, null);
+                    if (tracker3 != null && resolveMethod != null && routeMethod != null)
+                    {
+                        var trackerRef3 = asmDef.MainModule.ImportReference(tracker3);
+                        var resolveRef = asmDef.MainModule.ImportReference(resolveMethod);
+                        var routeRef = asmDef.MainModule.ImportReference(routeMethod);
+                        foreach (var m in patchFunctionsType.Methods)
+                        {
+                            if (m.Name != "UpdateWrapper" || !m.IsStatic) continue;
+                            if (m.Parameters.Count < 2) continue;
+                            if (m.Parameters[0].ParameterType.FullName != "System.Reflection.MethodBase")
+                                continue;
+                            if (!m.HasBody) continue;
+
+                            var il = m.Body.GetILProcessor();
+                            var first = m.Body.Instructions[0];
+
+                            // ldarg.0 → IsMethodPatchedByProxy → brfalse FIRST
+                            il.InsertBefore(first, il.Create(OpCodes.Ldarg, m.Parameters[0]));
+                            il.InsertBefore(first, il.Create(OpCodes.Call, trackerRef3));
+                            il.InsertBefore(first, il.Create(OpCodes.Brfalse, first));
+
+                            // Conflict! Try migration → brtrue FIRST
+                            il.InsertBefore(first, il.Create(OpCodes.Ldarg, m.Parameters[0]));
+                            il.InsertBefore(first, il.Create(OpCodes.Call, resolveRef));
+                            il.InsertBefore(first, il.Create(OpCodes.Brtrue, first));
+
+                            // Migration failed → RouteConflictUpdateWrapper
+                            il.InsertBefore(first, il.Create(OpCodes.Ldarg, m.Parameters[0]));
+                            il.InsertBefore(first, il.Create(OpCodes.Ldarg, m.Parameters[1]));
+                            il.InsertBefore(first, il.Create(OpCodes.Call, routeRef));
+                            il.InsertBefore(first, il.Create(OpCodes.Ret));
+                        }
+                    }
+                }
+
                 using var outMs = new MemoryStream();
                 asmDef.Write(outMs);
                 return outMs.ToArray();
@@ -211,7 +302,7 @@ namespace UMMBridge
         [ThreadStatic]
         internal static string _currentLoadingPath;
 
-        private static bool Prefix_LoadFrom(ref string assemblyFile, ref Assembly __result)
+        private static bool Prefix_LoadFrom(string assemblyFile, ref Assembly __result)
         {
             if (!assemblyFile.Contains(ModsDirName))
                 return true;
