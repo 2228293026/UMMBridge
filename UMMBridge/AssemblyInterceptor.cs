@@ -8,7 +8,6 @@ using HarmonyLib;
 using MelonLoader;
 using MelonLoader.Utils;
 using Mono.Cecil;
-using Mono.Cecil.Rocks;
 using Mono.Cecil.Cil;
 
 // ── Assembly interceptor ────────────────────────────────────────────

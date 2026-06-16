@@ -1,7 +1,5 @@
-using System;
 using System.Linq;
 using System.Reflection;
-using MelonLoader;
 using Mono.Cecil;
 using Mono.Cecil.Rocks;
 using Mono.Cecil.Cil;

@@ -6,7 +6,6 @@ using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using MelonLoader;
-using MelonLoader.Utils;
 using UnityEngine;
 using UnityModManagerNet;
 
