@@ -60,6 +60,65 @@ public class Bridge : MelonPlugin
         return asm.Location;
     }
 
+    /// <summary>
+    /// Proxy for Harmony 2.3.x Patch() calls intercepted via Cecil rewriting
+    /// in mod assemblies (no transpiler detected).  Translates 0Harmony_UMM's
+    /// HarmonyMethod objects to HarmonyX HarmonyMethod and delegates to
+    /// HarmonyX, ensuring only HarmonyX's MonoMod creates native detours.
+    /// </summary>
+    public static MethodInfo ProxyPatch(
+        object harmonyIgnored,  // 0Harmony_UMM's Harmony instance, unused
+        MethodBase original,
+        object prefix,
+        object postfix,
+        object transpiler,
+        object finalizer)
+    {
+        var id = "UMMBridge.Proxy." + original.DeclaringType?.Name + "." + original.Name;
+        var harmony = new HarmonyLib.Harmony(id);
+
+        HarmonyLib.HarmonyMethod ToHx(object hm)
+        {
+            if (hm == null) return null;
+            var srcType = hm.GetType();
+            var mi = srcType.GetField("method")?.GetValue(hm) as MethodInfo;
+            if (mi == null) return null;
+
+            var hx = new HarmonyLib.HarmonyMethod(mi);
+
+            // Read known fields by name.  0Harmony_UMM and HarmonyX share
+            // the same field names/CLR types for priority, before, after,
+            // debug.  Fields only in one side (beforeHard, afterHard,
+            // mergedBefore/After) are never read, avoiding cross-assembly
+            // type mismatches without needing type-level reflection checks.
+            var p = srcType.GetField("priority")?.GetValue(hm);
+            if (p is int _) typeof(HarmonyLib.HarmonyMethod).GetField("priority")?.SetValue(hx, p);
+
+            var d = srcType.GetField("debug")?.GetValue(hm);
+            if (d is bool _) typeof(HarmonyLib.HarmonyMethod).GetField("debug")?.SetValue(hx, d);
+
+            var bf = srcType.GetField("before")?.GetValue(hm);
+            if (bf is string[] _) typeof(HarmonyLib.HarmonyMethod).GetField("before")?.SetValue(hx, bf);
+
+            var af = srcType.GetField("after")?.GetValue(hm);
+            if (af is string[] _) typeof(HarmonyLib.HarmonyMethod).GetField("after")?.SetValue(hx, af);
+
+            return hx;
+        }
+
+        var proc = harmony.CreateProcessor(original);
+        var prefixHx = ToHx(prefix);
+        if (prefixHx != null) proc.AddPrefix(prefixHx);
+        var postfixHx = ToHx(postfix);
+        if (postfixHx != null) proc.AddPostfix(postfixHx);
+        var transpilerHx = ToHx(transpiler);
+        if (transpilerHx != null) proc.AddTranspiler(transpilerHx);
+        var finalizerHx = ToHx(finalizer);
+        if (finalizerHx != null) proc.AddFinalizer(finalizerHx);
+
+        return proc.Patch();
+    }
+
     private void PatchUI()
     {
         try

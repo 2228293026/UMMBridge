@@ -39,19 +39,7 @@ namespace UMMBridge
 
         static AssemblyInterceptor()
         {
-            AppDomain.CurrentDomain.TypeResolve += OnTypeResolve;
             AppDomain.CurrentDomain.AssemblyResolve += OnAssemblyResolve;
-        }
-
-        private static Assembly OnTypeResolve(object sender, ResolveEventArgs args)
-        {
-            var name = args.Name.Split(',')[0].Trim();
-            if (name == "HarmonyLib.HarmonyPatchCategory")
-            {
-                Melon<Bridge>.Logger.Msg("TypeResolve: served HarmonyPatchCategory stub");
-                return typeof(HarmonyPatchCategory).Assembly;
-            }
-            return null;
         }
 
         private static Assembly OnAssemblyResolve(object sender, ResolveEventArgs args)
@@ -128,30 +116,12 @@ namespace UMMBridge
             }
         }
 
-        private static void VerifyPatchCategoryStub()
-        {
-            try
-            {
-                var resolved = Type.GetType("HarmonyLib.HarmonyPatchCategory, 0Harmony", false);
-                if (resolved != null)
-                    Melon<Bridge>.Logger.Msg("HarmonyPatchCategory stub verified (TypeResolve active)");
-                else
-                    Melon<Bridge>.Logger.Warning("HarmonyPatchCategory stub not reachable via TypeResolve");
-            }
-            catch (Exception ex)
-            {
-                Melon<Bridge>.Logger.Warning($"HarmonyPatchCategory stub test failed: {ex.Message}");
-            }
-        }
-
         // ── Initialization ──────────────────────────────────────────────
 
         public static void Initialize()
         {
             if (_initialized) return;
             _initialized = true;
-
-            VerifyPatchCategoryStub();
 
             _harmonyX = AppDomain.CurrentDomain.GetAssemblies()
                 .FirstOrDefault(a => a.GetName().Name == "0Harmony" &&
@@ -174,16 +144,11 @@ namespace UMMBridge
                 var loadFrom = AccessTools.Method(typeof(Assembly), "LoadFrom", new[] { typeof(string) });
                 var prefix = AccessTools.Method(typeof(AssemblyInterceptor), nameof(Prefix_LoadFrom));
 
-                var unpatchAll = AccessTools.Method(typeof(HarmonyLib.Harmony), "UnpatchAll", new[] { typeof(string) });
-                var prefixUnpatch = AccessTools.Method(typeof(AssemblyInterceptor), nameof(Prefix_UnpatchAll));
-
                 if (loadFrom != null && prefix != null)
                 {
                     h.Patch(loadFrom, new HarmonyMethod(prefix));
-                    if (unpatchAll != null && prefixUnpatch != null)
-                        h.Patch(unpatchAll, new HarmonyMethod(prefixUnpatch));
                     Melon<Bridge>.Logger.Msg(
-                        "Assembly.LoadFrom + UnpatchAll interceptors active");
+                        "Assembly.LoadFrom interceptor active");
                 }
             }
             catch (Exception ex)
@@ -252,7 +217,6 @@ namespace UMMBridge
                 return true;
 
             RegisterModDirectory(assemblyFile);
-            ScanHarmonyPatchCategories(assemblyFile);
 
             var patched = PatchAssemblyFile(assemblyFile);
             if (patched == null)
@@ -272,149 +236,5 @@ namespace UMMBridge
             }
         }
 
-        // ── Mono.Cecil IL rewriting ──────────────────────────────────────
-
-        private static byte[] PatchAssemblyFile(string filePath)
-        {
-            byte[] originalBytes;
-            try { originalBytes = File.ReadAllBytes(filePath); }
-            catch { return null; }
-
-            using (var ms = new MemoryStream(originalBytes))
-            using (var asmDef = AssemblyDefinition.ReadAssembly(ms))
-            {
-                bool modified = false;
-                var harmonyRef = asmDef.MainModule.AssemblyReferences
-                    .FirstOrDefault(r => r.Name == "0Harmony");
-
-                if (harmonyRef != null)
-                {
-                    // All UMM mods share a single Harmony 2.3.x runtime
-                    // (0Harmony_UMM) to prevent cross-runtime conflicts.
-                    // HarmonyX is only used by MelonLoader itself.
-                    harmonyRef.Name = "0Harmony_UMM";
-                    harmonyRef.PublicKeyToken = Array.Empty<byte>();
-                    modified = true;
-                    Melon<Bridge>.Logger.Msg(
-                        $"{Path.GetFileName(filePath)} → 0Harmony_UMM");
-                }
-
-                // Import Bridge.GetAssemblyLocation for Cecil rewriting
-                MethodReference getLocationHelper = null;
-                try
-                {
-                    var helper = typeof(Bridge).GetMethod(
-                        nameof(Bridge.GetAssemblyLocation),
-                        BindingFlags.Public | BindingFlags.Static,
-                        null, new[] { typeof(Assembly) }, null);
-                    if (helper != null)
-                        getLocationHelper = asmDef.MainModule.ImportReference(helper);
-                }
-                catch { }
-
-                foreach (var type in asmDef.MainModule.GetAllTypes())
-                    foreach (var method in type.Methods)
-                    {
-                        if (!method.HasBody) continue;
-                        modified |= RewriteHardcodedPaths(method);
-                        modified |= RewriteHarmonyLegacyMethods(method);
-                        if (getLocationHelper != null)
-                            modified |= RewriteAssemblyGetLocation(method, getLocationHelper);
-                    }
-
-                if (!modified) return null;
-
-                using var outMs = new MemoryStream();
-                asmDef.Write(outMs);
-                Melon<Bridge>.Logger.Msg($"Patched assembly: {Path.GetFileName(filePath)}");
-                return outMs.ToArray();
-            }
-        }
-
-        /// <summary>
-        /// Replace calls to Assembly.get_Location() with
-        /// Bridge.GetAssemblyLocation(Assembly) so that byte-loaded
-        /// UMM mods can recover their original file paths at runtime.
-        /// HarmonyX's patching of this virtual getter is unreliable
-        /// (see: HarmonyX detour limitations).
-        /// </summary>
-        private static bool RewriteAssemblyGetLocation(MethodDefinition method, MethodReference helper)
-        {
-            bool modified = false;
-            foreach (var inst in method.Body.Instructions)
-            {
-                if ((inst.OpCode != OpCodes.Call && inst.OpCode != OpCodes.Callvirt) ||
-                    inst.Operand is not MethodReference mr ||
-                    mr.Name != "get_Location" ||
-                    mr.DeclaringType.FullName != "System.Reflection.Assembly")
-                    continue;
-
-                // get_Location is a virtual instance getter → callvirt;
-                // our helper is a static method → call.
-                inst.OpCode = OpCodes.Call;
-                inst.Operand = helper;
-                modified = true;
-            }
-            return modified;
-        }
-
-        private static bool RewriteHardcodedPaths(MethodDefinition method)
-        {
-            bool modified = false;
-            foreach (var inst in method.Body.Instructions)
-            {
-                if (inst.OpCode != OpCodes.Ldstr || inst.Operand is not string s)
-                    continue;
-
-                string replaced = null;
-                if (s == "Mods")
-                    replaced = ModsDirName;
-                else if (s.EndsWith("/Mods"))
-                    replaced = s.Substring(0, s.Length - 4) + ModsDirName;
-                else if (s.EndsWith("\\Mods"))
-                    replaced = s.Substring(0, s.Length - 4) + ModsDirName;
-                else if (s.EndsWith("/Mods/"))
-                    replaced = s.Substring(0, s.Length - 5) + ModsDirName + "/";
-                else if (s.EndsWith("\\Mods\\"))
-                    replaced = s.Substring(0, s.Length - 5) + ModsDirName + "\\";
-                else if (s.StartsWith("Mods/"))
-                    replaced = ModsDirName + "/" + s.Substring(5);
-                else if (s.StartsWith("Mods\\"))
-                    replaced = ModsDirName + "\\" + s.Substring(5);
-                else if (s.Contains("/Mods/"))
-                    replaced = s.Replace("/Mods/", "/" + ModsDirName + "/");
-                else if (s.Contains("\\Mods\\"))
-                    replaced = s.Replace("\\Mods\\", "\\" + ModsDirName + "\\");
-
-                if (replaced != null && replaced != s)
-                {
-                    inst.Operand = replaced;
-                    modified = true;
-                }
-            }
-            return modified;
-        }
-
-        /// <summary>
-        /// Rewrite calls to Harmony 2.3.x methods that don't exist in HarmonyX.
-        /// Currently: PatchAllUncategorized → PatchAll (same signature).
-        /// </summary>
-        private static bool RewriteHarmonyLegacyMethods(MethodDefinition method)
-        {
-            bool modified = false;
-            if (!method.HasBody) return false;
-
-            foreach (var inst in method.Body.Instructions)
-            {
-                if (inst.Operand is MethodReference mr &&
-                    mr.DeclaringType.FullName == "HarmonyLib.Harmony" &&
-                    mr.Name == "PatchAllUncategorized")
-                {
-                    mr.Name = "PatchAll";
-                    modified = true;
-                }
-            }
-            return modified;
-        }
     }
 }
