@@ -329,6 +329,44 @@ public class Bridge : MelonPlugin
         }
     }
 
+    /// <summary>
+    /// Reflectively invoke 0Harmony_UMM's Harmony.Patch() with the given
+    /// parameters.  Used when the method already has a native detour or
+    /// when a transpiler is present (incompatible with HarmonyX).
+    /// </summary>
+    private static MethodInfo InvokeNativePatch(
+        object harmonyIgnored, MethodBase original,
+        object prefix, object postfix, object transpiler, object finalizer)
+    {
+        try
+        {
+            var harmonyType = harmonyIgnored.GetType();
+            var hmType = harmonyType.Assembly.GetType("HarmonyLib.HarmonyMethod");
+            var nativePatch = harmonyType.GetMethod("Patch", new[] {
+                typeof(MethodBase), hmType, hmType, hmType, hmType
+            });
+            if (nativePatch != null)
+            {
+                var nativeResult = (MethodInfo)nativePatch.Invoke(harmonyIgnored, new object[] {
+                    original, prefix, postfix, transpiler, finalizer
+                });
+                if (nativeResult != null)
+                {
+                    Melon<Bridge>.Logger.Msg(
+                        $"[DBG] PatchedMethods SET {original.DeclaringType?.Name}.{original.Name}=true (source=InvokeNativePatch)");
+                    PatchedMethods[original] = true;
+                }
+                return nativeResult;
+            }
+        }
+        catch (Exception ex)
+        {
+            Melon<Bridge>.Logger.Warning(
+                $"InvokeNativePatch failed for \"{original.DeclaringType?.Name}.{original.Name}\": {ex.Message}");
+        }
+        return null;
+    }
+
     private static void SetHmFields(object hmObj, int priority, bool debug,
         string[] before, string[] after)
     {
@@ -403,12 +441,15 @@ public class Bridge : MelonPlugin
         object transpiler,
         object finalizer)
     {
-        // If already natively patched, skip to avoid dual-MonoMod conflict
+        // ── Native detour path ──────────────────────────────────────────
+        // If 0Harmony_UMM already owns this method, route ALL further
+        // patches (transpiler or not) through 0Harmony_UMM so there's
+        // only one MonoMod writing JMP detours.
         if (PatchedMethods.TryGetValue(original, out var fromNative) && fromNative)
         {
-            Melon<Bridge>.Logger.Warning(
-                $"Skip ProxyPatch for \"{original.DeclaringType?.Name}.{original.Name}\" — already natively detoured");
-            return null;
+            Melon<Bridge>.Logger.Msg(
+                $"ProxyPatch: \"{original.DeclaringType?.Name}.{original.Name}\" already native — routing to 0Harmony_UMM");
+            return InvokeNativePatch(harmonyIgnored, original, prefix, postfix, transpiler, finalizer);
         }
 
         // ── Transpiler path ────────────────────────────────────────────
@@ -416,30 +457,7 @@ public class Bridge : MelonPlugin
         // 0Harmony_UMM's native Patch() via reflection.
         if (transpiler != null)
         {
-            try
-            {
-                var harmonyType = harmonyIgnored.GetType();
-                var hmType = harmonyType.Assembly.GetType("HarmonyLib.HarmonyMethod");
-                var nativePatch = harmonyType.GetMethod("Patch", new[] {
-                    typeof(MethodBase), hmType, hmType, hmType, hmType
-                });
-                if (nativePatch != null)
-                {
-                    var nativeResult = (MethodInfo)nativePatch.Invoke(harmonyIgnored, new object[] {
-                        original, prefix, postfix, transpiler, finalizer
-                    });
-                    if (nativeResult != null)
-                                                Melon<Bridge>.Logger.Msg("[DBG] PatchedMethods SET " + original.Name + "=true (source=ProxyPatch native transpiler)");
-                        PatchedMethods[original] = true; // tracked as native
-                    return nativeResult;
-                }
-            }
-            catch (Exception ex)
-            {
-                Melon<Bridge>.Logger.Warning(
-                    $"ProxyPatch native fallback failed for \"{original.DeclaringType?.Name}.{original.Name}\": {ex.Message}");
-            }
-            return null;
+            return InvokeNativePatch(harmonyIgnored, original, prefix, postfix, transpiler, finalizer);
         }
 
         // ── Non-transpiler path ────────────────────────────────────────
