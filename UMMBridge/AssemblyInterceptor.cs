@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -33,6 +34,15 @@ namespace UMMBridge
         internal static string ModsRootPath =>
             Path.Combine(MelonEnvironment.GameRootDirectory, ModsDirName);
 
+        /// <summary>
+        /// Temp directory for writing patched assemblies before LoadFrom.
+        /// Using LoadFrom (LoadFrom context) instead of Load(byte[])
+        /// (no-context) preserves CLR type identity for generic types like
+        /// PriorityQueue&lt;SkyHookEvent,ulong&gt;, preventing cross-runtime
+        /// as-cast failures.
+        /// </summary>
+        internal static string TempDir { get; private set; }
+
         private static readonly Dictionary<string, string> _assemblyToDir = new();
         private static readonly Dictionary<string, Assembly> _assemblyCache = new();
 
@@ -50,6 +60,34 @@ namespace UMMBridge
 
             if (name == "0Harmony" && _harmonyX != null)
                 return _harmonyX;
+
+            // ── Intercept core game assemblies ──────────────────────────
+            // Prevent LoadFrom-context (or no-context edge case) from
+            // loading a second copy of game DLLs like Assembly-CSharp.
+            // Without this, the same generic type instantiation can end up
+            // as two different CLR types — no Cecil or Cecil-type-ref fix
+            // can salvage that.
+            if (name == "Assembly-CSharp" || name == "Assembly-CSharp-firstpass")
+            {
+                var gameAsm = AppDomain.CurrentDomain.GetAssemblies()
+                    .FirstOrDefault(a => a.GetName().Name == name
+                        && !a.Location.Contains(TempDir ?? ""));
+                if (gameAsm != null)
+                {
+                    Melon<Bridge>.Logger.Msg(
+                        $"AssemblyResolve: redirected {name} to existing instance (from {gameAsm.Location})");
+                    return gameAsm;
+                }
+            }
+
+            // Return an already-loaded assembly if one exists.  Prevents
+            // duplicate loads of game assemblies from UMMMods directories,
+            // which would create second copies of the same generic types
+            // and break cross-runtime as casts (Type#1 ≠ Type#2).
+            var existing = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => a.GetName().Name == name);
+            if (existing != null)
+                return existing;
 
             lock (_assemblyToDir)
             {
@@ -312,9 +350,15 @@ namespace UMMBridge
             if (patched == null)
                 return true;
 
+            // Write to temp file and load via LoadFrom to preserve CLR type
+            // identity (LoadFrom context).  Assembly.Load(byte[]) creates a
+            // no-context assembly whose generic types differ from the game's.
             _currentLoadingPath = assemblyFile;
             try
             {
+                // Load from bytes (no-context) so that all assembly references
+                // resolve through the default Load context — no duplicate
+                // loading of game assemblies (Assembly-CSharp stays single).
                 var asm = Assembly.Load(patched);
                 _assemblyOriginalPath.Add(asm, assemblyFile);
                 __result = asm;
@@ -324,6 +368,15 @@ namespace UMMBridge
             {
                 _currentLoadingPath = null;
             }
+        }
+
+        /// <summary>
+        /// Clean up the temp directory on shutdown.
+        /// </summary>
+        internal static void Cleanup()
+        {
+            if (TempDir != null && Directory.Exists(TempDir))
+                try { Directory.Delete(TempDir, true); } catch { }
         }
 
     }

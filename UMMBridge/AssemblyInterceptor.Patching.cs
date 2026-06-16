@@ -69,6 +69,12 @@ namespace UMMBridge
                     }
                 }
 
+                // Creplay: fix cross-runtime as cast.  PriorityQueue<SkyHookEvent,ulong>
+                // lives on Mono's heap; isinst in .NET 4.8 fails type-identity check.
+                // Change isinst PriorityQueue`2 → isinst object so the cast always passes.
+                if (asmDef.Name.Name == "Creplay")
+                    modified |= FixCreplayCrossRuntime(asmDef);
+
                 // Import Bridge.GetAssemblyLocation for Cecil rewriting
                 MethodReference getLocationHelper = null;
                 try
@@ -161,6 +167,54 @@ namespace UMMBridge
                     modified = true;
                 }
             }
+            return modified;
+        }
+
+        /// <summary>
+        /// Creplay's sortedKeyQueue_instance is populated via reflection at
+        /// start_recording().  The PriorityQueue&lt;SkyHookEvent,ulong&gt;
+        /// instance lives on Mono's heap; isinst in .NET 4.8 fails because
+        /// CLR type identity differs between runtimes.  Fix:
+        ///   - Field type: PriorityQueue&lt;...&gt; → System.Object
+        ///   - isinst target: PriorityQueue`2 → System.Object
+        /// This lets the reference pass through; later == comparison works.
+        /// </summary>
+        private static bool FixCreplayCrossRuntime(AssemblyDefinition asmDef)
+        {
+            bool modified = false;
+            var objectType = asmDef.MainModule.TypeSystem.Object;
+
+            // Change field type to object
+            var creplayType = asmDef.MainModule.GetType("CREPLAY.Creplay");
+            if (creplayType == null) return false;
+
+            var skqField = creplayType.Fields.FirstOrDefault(f => f.Name == "sortedKeyQueue_instance");
+            if (skqField != null && skqField.FieldType.MetadataType != MetadataType.Object)
+            {
+                skqField.FieldType = objectType;
+                modified = true;
+            }
+
+            // Change every isinst PriorityQueue`2 to isinst object
+            foreach (var type in asmDef.MainModule.GetAllTypes())
+                foreach (var method in type.Methods)
+                {
+                    if (!method.HasBody) continue;
+                    foreach (var inst in method.Body.Instructions)
+                    {
+                        if (inst.OpCode == OpCodes.Isinst &&
+                            inst.Operand is TypeReference tr &&
+                            tr.FullName.StartsWith("System.Collections.Generic.PriorityQueue`2"))
+                        {
+                            inst.Operand = objectType;
+                            modified = true;
+                        }
+                    }
+                }
+
+            if (modified)
+                Melon<Bridge>.Logger.Msg(
+                    "  Creplay fix: sortedKeyQueue_instance → object");
             return modified;
         }
     }

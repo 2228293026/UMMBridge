@@ -393,6 +393,91 @@ public class Bridge : MelonPlugin
         AccessTools.Method(typeof(Injector), "RunUI").Invoke(null, null);
 
         PatchUI();
+        PatchCreplayTriggerMessage();
+    }
+
+    /// <summary>
+    /// Creplay.TriggerMessage(string, float) calls UMM UI notifications
+    /// which aren't fully functional under MelonLoader — the underlying
+    /// singleton or UI component is null, throwing NRE.  This prefix
+    /// intercepts the call, logs the message via MelonLoader instead,
+    /// and skips the original to prevent the crash.
+    /// </summary>
+    private static void PatchCreplayTriggerMessage()
+    {
+        try
+        {
+            var creplayType = AccessTools.TypeByName("CREPLAY.Creplay");
+            if (creplayType == null) return;
+
+            var triggerMethod = AccessTools.Method(creplayType, "TriggerMessage",
+                new[] { typeof(string), typeof(float) });
+            if (triggerMethod == null) return;
+
+            new HarmonyLib.Harmony("UMMBridge.CreplayFix")
+                .Patch(triggerMethod, prefix: new HarmonyMethod(
+                    typeof(Bridge), nameof(Pre_TriggerMessage)));
+
+            Melon<Bridge>.Logger.Msg("Patched Creplay.TriggerMessage → MelonLoader log");
+        }
+        catch (Exception ex)
+        {
+            Melon<Bridge>.Logger.Warning($"Failed to patch Creplay.TriggerMessage: {ex.Message}");
+        }
+    }
+
+
+    private static string _displayMessage = null;
+    private static float _messageEndTime = 0f;
+
+    // 在 Pre_TriggerMessage 中设置消息（并启动显示）
+    public static bool Pre_TriggerMessage(string message, float dur = 5)
+    {
+        // 设置屏幕显示
+        _displayMessage = message;
+        _messageEndTime = Time.unscaledTime + dur; // dur 是显示时长（秒）
+
+        // 如果尚未创建显示 GameObject，则创建
+        if (_displayInstance == null)
+        {
+            var go = new GameObject("UMMBridge_MessageDisplay");
+            GameObject.DontDestroyOnLoad(go);
+            _displayInstance = go.AddComponent<MessageDisplay>();
+        }
+
+        return false; // 跳过原始方法
+    }
+
+    // MonoBehaviour 负责 OnGUI 绘制
+    private class MessageDisplay : MonoBehaviour
+    {
+        private void OnGUI()
+        {
+            if (string.IsNullOrEmpty(_displayMessage) || Time.unscaledTime > _messageEndTime)
+            {
+                _displayMessage = null;
+                return;
+            }
+
+            var rect = new Rect(10, 10, Screen.width - 20, 60);
+            var style = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 20,
+                fontStyle = FontStyle.Normal,
+                normal = { textColor = Color.white },
+                alignment = TextAnchor.UpperLeft
+            };
+            // 黑色阴影
+            var shadowRect = new Rect(rect.x + 1, rect.y + 1, rect.width, rect.height);
+            GUI.Label(shadowRect, _displayMessage, style);
+            GUI.Label(rect, _displayMessage, style);
+        }
+    }
+
+    private static MessageDisplay _displayInstance;
+    public override void OnApplicationQuit()
+    {
+        AssemblyInterceptor.Cleanup();
     }
 
     private static bool RedirectModsPath(ref string __result)
@@ -441,6 +526,20 @@ public class Bridge : MelonPlugin
         object transpiler,
         object finalizer)
     {
+        // ── Cross-runtime MethodBase redirect ──────────────────────────
+        // When a UMM mod (loaded via LoadFrom context) patches a method
+        // on a generic type whose closed instantiation exists in two CLR
+        // copies (LoadFrom copy vs default Load copy), redirect to the
+        // already-loaded instance that the game actually calls.
+        if (NeedsMethodRedirect(original, out var corrected))
+        {
+            Melon<Bridge>.Logger.Msg(
+                $"ProxyPatch: redirect {original.DeclaringType?.Name}.{original.Name} " +
+                $"[0x{original.DeclaringType.TypeHandle.Value:X}] → " +
+                $"[0x{corrected.DeclaringType.TypeHandle.Value:X}]");
+            original = corrected;
+        }
+
         // ── Native detour path ──────────────────────────────────────────
         // If 0Harmony_UMM already owns this method, route ALL further
         // patches (transpiler or not) through 0Harmony_UMM so there's
@@ -507,6 +606,42 @@ public class Bridge : MelonPlugin
         var result = proc.Patch();
         PatchedMethods[original] = false; // track as ProxyPatch
         return result;
+    }
+
+    /// <summary>
+    /// Detect and redirect cross-runtime generic type identity splits.
+    /// When a mod assembly is loaded via LoadFrom context, its references
+    /// to generic type instantiations can resolve to different CLR types
+    /// than the game's already-loaded copies — even when both claim to
+    /// be from the same assembly (e.g. Assembly-CSharp loaded twice).
+    /// Harmony detours on the wrong copy are silent no-ops.
+    /// </summary>
+    private static bool NeedsMethodRedirect(MethodBase original, out MethodBase corrected)
+    {
+        corrected = null;
+
+        // Only handle PriorityQueue<SkyHookEvent, ulong>.Enqueue for now
+        if (original.Name != "Enqueue") return false;
+        if (original.DeclaringType?.Name != "PriorityQueue`2") return false;
+
+        try
+        {
+            var scrCtrl = AccessTools.TypeByName("scrController");
+            if (scrCtrl == null) return false;
+            var field = scrCtrl.GetField("sortedKeyQueue",
+                BindingFlags.Instance | BindingFlags.NonPublic |
+                BindingFlags.Public | BindingFlags.Static);
+            if (field == null) return false;
+            var gameType = field.FieldType;
+
+            // Same CLR type identity — no redirect needed
+            if (original.DeclaringType == gameType) return false;
+
+            // Find Enqueue on the game's actual type
+            corrected = AccessTools.Method(gameType, "Enqueue");
+            return corrected != null;
+        }
+        catch { return false; }
     }
 
     private void PatchUI()
