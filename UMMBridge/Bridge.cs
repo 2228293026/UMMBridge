@@ -475,10 +475,6 @@ public class Bridge : MelonPlugin
     }
 
     private static MessageDisplay _displayInstance;
-    public override void OnApplicationQuit()
-    {
-        AssemblyInterceptor.Cleanup();
-    }
 
     private static bool RedirectModsPath(ref string __result)
     {

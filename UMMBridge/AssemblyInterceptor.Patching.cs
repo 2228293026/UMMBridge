@@ -206,7 +206,7 @@ namespace UMMBridge
                             inst.Operand is TypeReference tr &&
                             tr.FullName.StartsWith("System.Collections.Generic.PriorityQueue`2"))
                         {
-                            inst.Operand = objectType;
+                            inst.Operand = objectType;  // isinst System.Object
                             modified = true;
                         }
                     }
