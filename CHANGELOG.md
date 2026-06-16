@@ -4,22 +4,29 @@
 
 ### 中文
 
+- **跨运行时类型兼容** — 对 Creplay 执行 IL 重写，将 `sortedKeyQueue_instance` 类型及所有 `isinst PriorityQueue` 改为 `object`，绕过 CLR 类型身份检查；在 `ProxyPatch` 中增加 `NeedsMethodRedirect`，将泛型方法补丁重定向到游戏已加载的实例
+- **程序集加载策略** — 改用 `LoadFrom` 临时文件加载，保留加载上下文，避免泛型类型分裂；`AssemblyResolve` 拦截 `Assembly-CSharp` 等核心程序集，直接返回已加载实例，防止重复加载
 - **冲突迁移（Migration）** — 当 transpiler 补丁到达已被 ProxyPatch 占用的方法时，自动将 HarmonyX 上的非 transpiler 补丁迁移到 0Harmony_UMM，使同一运行时可叠加所有补丁
 - **三层冲突解决** — UpdateWrapper IL 注入（CreateClassProcessor 路径）、Harmony.Patch() 前缀（直接 Patch 路径）、ProxyPatch 路由（Cecil 重写），三层兜底无死角
 - **InvokeNativePatch 提取** — 统一原生补丁入口，解决加载顺序导致非 transpiler 补丁被静默丢弃的问题
 - **MigratePatches 异常安全** — TryResolveConflict 层 catch，迁移失败走路由回退，不再崩模载
+- **Creplay 消息显示** — 补丁 `TriggerMessage`，在游戏左上角显示消息，使用 `Time.unscaledTime` 不受暂停影响
 - **Assembly.Read 异常保护** — 非 .NET 程序集跳过报错，不再抛 BadImageFormatException
 - **已知限制** — 跨运行时 transpiler 补同一函数必失其一（CodeInstruction 类型属于不同程序集）
 
+---
+
 ### English
 
+- **Cross-runtime type compatibility** — IL-rewrite Creplay to change `sortedKeyQueue_instance` field type and all `isinst PriorityQueue` to `object`, bypassing CLR type identity checks; add `NeedsMethodRedirect` in `ProxyPatch` to redirect generic method patches to the game's actual instance
+- **Assembly loading strategy** — Switch to `LoadFrom` via temp file to preserve load context, preventing generic type splitting; intercept `Assembly-CSharp` in `AssemblyResolve` to reuse already-loaded instances, avoiding duplicate loads
 - **Conflict migration** — When a transpiler patch arrives at a method already claimed by ProxyPatch, non-transpiler patches on HarmonyX are automatically migrated to 0Harmony_UMM, allowing a single runtime to host all patches
 - **Three-layer resolution** — UpdateWrapper IL injection (CreateClassProcessor path), Harmony.Patch() prefix (direct Patch path), ProxyPatch routing (Cecil rewrite) — no gap
 - **InvokeNativePatch extracted** — Unified native entry point, fixing silent drop of non-transpiler patches due to load order
 - **MigratePatches exception safety** — Caught in TryResolveConflict, routing fallback on failure, no crash
+- **Creplay message display** — Patch `TriggerMessage` to show on-screen in top-left corner using unscaled time (unaffected by pause)
 - **Assembly.Read guard** — Skip non-.NET assemblies with warning instead of BadImageFormatException
 - **Known limitation** — Cross-runtime transpiler patches on the same method cannot coexist (CodeInstruction types belong to different assemblies)
-
 ---
 
 
