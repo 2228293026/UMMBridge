@@ -20,19 +20,29 @@ UMM ships **0Harmony 2.3.6** (with its own MonoMod) while MelonLoader uses **Har
 
 ### Patch routing
 
-- **Non-transpiler assemblies** — Cecil-rewritten via `ProxyPatch`, applied through HarmonyX
-- **Transpiler assemblies** — Left untouched, run natively on `0Harmony_UMM`
-- **Migration** — When a transpiler patch arrives at a method already owned by ProxyPatch (HarmonyX), the non-transpiler patches are migrated to `0Harmony_UMM` so all UMM patches share one MonoMod detour
-- **Fallback** — When migration is impossible (ML mod owns the method), non-transpiler patches are routed to HarmonyX, transpiler patches are silently skipped
+- **Non-transpiler assemblies** — Cecil-rewritten via `ProxyPatch`, applied through **HarmonyX**.
+- **Transpiler assemblies** — Left untouched, run natively on **0Harmony_UMM**.
+- **Migration** — When a transpiler patch arrives at a method already owned by ProxyPatch (HarmonyX), the *non-transpiler* patches that are already on HarmonyX are moved to 0Harmony_UMM, so that the transpiler and those non-transpiler patches share the same MonoMod detour. This works only if **all** patches on HarmonyX for that method are UMMBridge‑owned and contain no transpilers.
+- **Fallback** — When migration is impossible (e.g., a MelonLoader mod owns the method, or the method already has a transpiler on HarmonyX), non‑transpiler patches are routed to HarmonyX, while transpiler patches are **silently skipped**.
 
 ### Coexistence
 
-| Patch type | UMM + ML on same method | Two UMM on same method |
-|------------|------------------------|----------------------|
-| Prefix / Postfix / Finalizer | ✅ Always works | ✅ Always works |
-| Transpiler | ❌ Cross-runtime fails (CodeInstruction type mismatch) | ✅ Same runtime — works natively |
+The following table summarizes what happens when two patches target the same method:
 
-Cross-runtime transpiler conflict on the same method is a **known limitation**: the two `HarmonyLib.CodeInstruction` types belong to different assemblies and cannot be mixed.
+| Scenario | Patch Type | Result |
+|----------|------------|--------|
+| Both patches on **same runtime** (both HarmonyX or both 0Harmony_UMM) | Any (incl. transpilers) | ✅ **Always works** — multiple patches can stack on the same MonoMod. |
+| One on HarmonyX, one on 0Harmony_UMM | Prefix/Postfix/Finalizer | ⚠️ **One wins** — whichever loads first takes effect; the second is blocked (or migrated if possible). |
+| One on HarmonyX, one on 0Harmony_UMM | Transpiler | ❌ **Never works** — the transpiler patch is blocked because it cannot be migrated to HarmonyX and cannot coexist with a different MonoMod detour. |
+
+**Key limitation:**  
+Two MonoMod runtimes (HarmonyX and 0Harmony_UMM) **cannot** both write JMP detours on the same method. Therefore, any scenario where one patch comes from HarmonyX and the other from 0Harmony_UMM will result in **only the first loaded patch remaining effective**. The UMMBridge migration mechanism can only move *non‑transpiler* patches from HarmonyX to 0Harmony_UMM, but this is conditional and cannot resolve conflicts when the method already has a transpiler on either side.
+
+### Limitations
+
+- **Cross‑runtime transpiler conflict** — If a UMM mod with a transpiler tries to patch a method that is already patched (even with a simple prefix) by a MelonLoader mod (HarmonyX), the transpiler patch will be **silently ignored**. This is unavoidable due to the incompatible `CodeInstruction` types between the two runtimes.
+- **Load‑order dependency** — To maximize compatibility, ensure that **transpiler‑containing UMM mods load before** any non‑transpiler mods that patch the same methods. This allows the transpiler to claim the method on 0Harmony_UMM, and later non‑transpiler patches can be added via migration.
+- **No perfect coexistence** — There is no way to make a HarmonyX‑based patch and a 0Harmony_UMM‑based patch both apply to the same method simultaneously. The design prioritizes stability over universal coexistence.
 
 ## Usage
 
@@ -41,6 +51,7 @@ Cross-runtime transpiler conflict on the same method is a **known limitation**: 
 3. Open the UMM window and click **Mods Dir** at the top-right
 
 ## Build
+
 
 ```
 dotnet build UMMBridge\UMMBridge.csproj -c Release
